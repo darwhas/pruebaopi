@@ -1,0 +1,291 @@
+# Microservice Base Chart - Default Values
+# This chart provides a standardized template for .NET microservices
+
+# Application Configuration
+application:
+  name: "microservice"
+  version: "latest"
+  environment: "production"
+  domain: "platform.local"
+
+# Image Configuration
+image:
+  repository: "platformacr.azurecr.io"
+  tag: "latest"
+  pullPolicy: "IfNotPresent"
+  # Image signing and security
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+
+# Container Configuration
+container:
+  port: 80
+  targetPort: 80
+  # Health checks
+  livenessProbe:
+    httpGet:
+      path: /health/live
+      port: 80
+    initialDelaySeconds: 30
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 3
+  readinessProbe:
+    httpGet:
+      path: /health/ready
+      port: 80
+    initialDelaySeconds: 5
+    periodSeconds: 5
+    timeoutSeconds: 3
+    failureThreshold: 3
+  startupProbe:
+    httpGet:
+      path: /health/startup
+      port: 80
+    initialDelaySeconds: 10
+    periodSeconds: 5
+    timeoutSeconds: 3
+    failureThreshold: 30
+
+# Resource Configuration
+resources:
+  requests:
+    cpu: "100m"
+    memory: "128Mi"
+  limits:
+    cpu: "500m"
+    memory: "512Mi"
+
+# Scaling Configuration
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: 80
+  # Custom metrics
+  customMetrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+
+# Ingress Configuration
+ingress:
+  enabled: true
+  className: "nginx"
+  annotations:
+    kubernetes.io/ingress.class: nginx
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    nginx.ingress.kubernetes.io/rate-limit: "100"
+    nginx.ingress.kubernetes.io/rate-limit-window: "1m"
+  hosts:
+    - host: "api.platform.local"
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: "api-tls"
+      hosts:
+        - "api.platform.local"
+
+# Service Configuration
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 80
+  annotations: {}
+
+# Environment Variables
+env:
+  # Common environment variables
+  common:
+    - name: ASPNETCORE_ENVIRONMENT
+      value: "Production"
+    - name: ASPNETCORE_URLS
+      value: "http://+:80"
+    - name: DOTNET_USE_POLLING_FILE_WATCHER
+      value: "true"
+  
+  # Application-specific variables (to be overridden)
+  application: []
+  
+  # Secret references (to be overridden)
+  secrets: []
+
+# ConfigMaps
+configMaps:
+  # Common configuration
+  common:
+    data:
+      appsettings.json: |
+        {
+          "Logging": {
+            "LogLevel": {
+              "Default": "Information",
+              "Microsoft": "Warning",
+              "Microsoft.Hosting.Lifetime": "Information"
+            }
+          },
+          "AllowedHosts": "*"
+        }
+  
+  # Application-specific configs (to be overridden)
+  application: {}
+
+# Secrets (references to Key Vault)
+secrets:
+  # Common secrets
+  common: []
+  
+  # Application-specific secrets (to be overridden)
+  application: []
+
+# Pod Configuration
+pod:
+  # Node selector for specific node pools
+  nodeSelector:
+    workload-type: "cpu-intensive"
+  
+  # Tolerations for spot instances
+  tolerations:
+    - key: "kubernetes.azure.com/scalesetpriority"
+      operator: "Equal"
+      value: "spot"
+      effect: "NoSchedule"
+  
+  # Affinity rules
+  affinity:
+    podAntiAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          podAffinityTerm:
+            labelSelector:
+              matchExpressions:
+                - key: app.kubernetes.io/name
+                  operator: In
+                  values:
+                    - "{{ .Values.application.name }}"
+            topologyKey: kubernetes.io/hostname
+
+# Network Policies
+networkPolicy:
+  enabled: true
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: ingress-nginx
+      ports:
+        - protocol: TCP
+          port: 80
+  egress:
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - protocol: TCP
+          port: 53
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              name: monitoring
+      ports:
+        - protocol: TCP
+          port: 9090
+
+# Monitoring Configuration
+monitoring:
+  enabled: true
+  serviceMonitor:
+    enabled: true
+    interval: "30s"
+    path: "/metrics"
+    port: "http"
+  podMonitor:
+    enabled: true
+    interval: "30s"
+    path: "/metrics"
+    port: "http"
+
+# Logging Configuration
+logging:
+  enabled: true
+  fluentd:
+    enabled: true
+    config:
+      parsers:
+        - name: json
+          type: json
+      filters:
+        - name: kubernetes
+          type: kubernetes
+          tag: kube.*
+
+# Security Configuration
+security:
+  # Pod Security Standards
+  podSecurityStandard: "restricted"
+  
+  # Security Context
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+    capabilities:
+      drop:
+        - ALL
+  
+  # Container Security Context
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    runAsNonRoot: true
+    runAsUser: 1000
+    capabilities:
+      drop:
+        - ALL
+
+# Backup Configuration
+backup:
+  enabled: true
+  schedule: "0 2 * * *"  # Daily at 2 AM
+  retention: "30d"
+  storage:
+    type: "azure"
+    container: "backups"
+
+# Rollback Configuration
+rollback:
+  enabled: true
+  maxHistory: 10
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 25%
+
+# Labels and Annotations
+labels:
+  app.kubernetes.io/name: "{{ .Values.application.name }}"
+  app.kubernetes.io/version: "{{ .Values.application.version }}"
+  app.kubernetes.io/component: "microservice"
+  app.kubernetes.io/part-of: "platform"
+
+annotations:
+  prometheus.io/scrape: "true"
+  prometheus.io/port: "80"
+  prometheus.io/path: "/metrics" 

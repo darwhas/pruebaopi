@@ -1,0 +1,374 @@
+# Azure DevOps CI Pipeline
+# Continuous Integration for .NET Microservices
+
+trigger:
+  branches:
+    include:
+      - main
+      - develop
+      - feature/*
+      - hotfix/*
+
+pr:
+  branches:
+    include:
+      - main
+      - develop
+
+variables:
+  # Build Configuration
+  solution: '**/*.sln'
+  buildPlatform: 'Any CPU'
+  buildConfiguration: 'Release'
+  
+  # Docker Configuration
+  dockerRegistryServiceConnection: 'platform-acr-service-connection'
+  imageRepository: '$(Build.Repository.Name)'
+  containerRegistry: 'platformacr.azurecr.io'
+  
+  # Security Configuration
+  sonarProjectKey: '$(Build.Repository.Name)'
+  sonarOrganization: 'your-org'
+  
+  # Testing Configuration
+  testResultsFormat: 'VSTest'
+  testResultsPublishTarget: 'TestResults'
+  
+  # Code Quality
+  codeCoverageEnabled: true
+  codeCoverageFailOption: 'onThreshold'
+  codeCoverageThreshold: 80
+
+stages:
+- stage: Validate
+  displayName: 'Code Validation'
+  jobs:
+  - job: ValidateCode
+    displayName: 'Validate Code Quality'
+    pool:
+      vmImage: 'ubuntu-latest'
+    
+    steps:
+    - task: UseDotNet@2
+      displayName: 'Use .NET 6 SDK'
+      inputs:
+        version: '6.0.x'
+        includePreviewVersions: false
+    
+    - task: DotNetCoreCLI@2
+      displayName: 'Restore NuGet packages'
+      inputs:
+        command: 'restore'
+        projects: '$(solution)'
+        feedsToUse: 'select'
+    
+    - task: DotNetCoreCLI@2
+      displayName: 'Build solution'
+      inputs:
+        command: 'build'
+        projects: '$(solution)'
+        arguments: '--configuration $(buildConfiguration) --no-restore'
+    
+    - task: SonarQubePrepare@4
+      displayName: 'Prepare SonarQube Analysis'
+      inputs:
+        SonarQube: 'SonarQube'
+        scannerMode: 'MSBuild'
+        projectKey: '$(sonarProjectKey)'
+        projectName: '$(Build.Repository.Name)'
+        projectVersion: '$(Build.BuildNumber)'
+        extraProperties: |
+          sonar.cs.opencover.reportsPaths=$(Build.SourcesDirectory)/**/coverage.opencover.xml
+          sonar.coverage.exclusions=**/*Test*,**/*Tests*,**/*test*,**/*tests*
+    
+    - task: DotNetCoreCLI@2
+      displayName: 'Run Code Analysis'
+      inputs:
+        command: 'msbuild'
+        projects: '$(solution)'
+        arguments: '/p:SonarQube=1 /p:Configuration=$(buildConfiguration)'
+    
+    - task: SonarQubePublish@4
+      displayName: 'Publish SonarQube Results'
+      inputs:
+        pollingTimeoutSec: '300'
+
+- stage: Test
+  displayName: 'Testing'
+  dependsOn: Validate
+  jobs:
+  - job: UnitTests
+    displayName: 'Run Unit Tests'
+    pool:
+      vmImage: 'ubuntu-latest'
+    
+    steps:
+    - task: UseDotNet@2
+      displayName: 'Use .NET 6 SDK'
+      inputs:
+        version: '6.0.x'
+        includePreviewVersions: false
+    
+    - task: DotNetCoreCLI@2
+      displayName: 'Restore packages'
+      inputs:
+        command: 'restore'
+        projects: '$(solution)'
+    
+    - task: DotNetCoreCLI@2
+      displayName: 'Run Unit Tests'
+      inputs:
+        command: 'test'
+        projects: '**/*Tests/*.csproj'
+        arguments: '--configuration $(buildConfiguration) --collect:"XPlat Code Coverage" --results-directory $(Build.ArtifactStagingDirectory)/TestResults'
+        publishTestResults: true
+    
+    - task: PublishCodeCoverageResults@1
+      displayName: 'Publish Code Coverage'
+      inputs:
+        codeCoverageTool: 'Cobertura'
+        summaryFileLocation: '$(Build.ArtifactStagingDirectory)/TestResults/**/coverage.cobertura.xml'
+        reportDirectory: '$(Build.ArtifactStagingDirectory)/TestResults/Coverage'
+      condition: succeededOrFailed()
+
+  - job: IntegrationTests
+    displayName: 'Run Integration Tests'
+    pool:
+      vmImage: 'ubuntu-latest'
+    
+    steps:
+    - task: UseDotNet@2
+      displayName: 'Use .NET 6 SDK'
+      inputs:
+        version: '6.0.x'
+        includePreviewVersions: false
+    
+    - task: DotNetCoreCLI@2
+      displayName: 'Restore packages'
+      inputs:
+        command: 'restore'
+        projects: '$(solution)'
+    
+    - task: DotNetCoreCLI@2
+      displayName: 'Run Integration Tests'
+      inputs:
+        command: 'test'
+        projects: '**/*IntegrationTests/*.csproj'
+        arguments: '--configuration $(buildConfiguration) --collect:"XPlat Code Coverage"'
+        publishTestResults: true
+      condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+
+- stage: Security
+  displayName: 'Security Scanning'
+  dependsOn: Test
+  jobs:
+  - job: SecurityScan
+    displayName: 'Security Analysis'
+    pool:
+      vmImage: 'ubuntu-latest'
+    
+    steps:
+    - task: UseDotNet@2
+      displayName: 'Use .NET 6 SDK'
+      inputs:
+        version: '6.0.x'
+        includePreviewVersions: false
+    
+    - task: DotNetCoreCLI@2
+      displayName: 'Restore packages'
+      inputs:
+        command: 'restore'
+        projects: '$(solution)'
+    
+    - task: DotNetCoreCLI@2
+      displayName: 'Security Scan - Dependency Check'
+      inputs:
+        command: 'custom'
+        custom: 'list package --vulnerable'
+        projects: '$(solution)'
+    
+    - task: DotNetCoreCLI@2
+      displayName: 'Security Scan - OWASP Dependency Check'
+      inputs:
+        command: 'custom'
+        custom: 'tool install --global dotnet-outdated-tool'
+    
+    - script: |
+        dotnet outdated --fail-on-updates
+      displayName: 'Check for outdated packages'
+    
+    - task: WhiteSource@21
+      displayName: 'WhiteSource Security Scan'
+      inputs:
+        cwd: '$(Build.SourcesDirectory)'
+        projectName: '$(Build.Repository.Name)'
+        userKey: '$(WhiteSourceUserKey)'
+        productName: 'Platform'
+        projectVersion: '$(Build.BuildNumber)'
+
+- stage: Build
+  displayName: 'Build and Package'
+  dependsOn: Security
+  jobs:
+  - job: BuildImage
+    displayName: 'Build Docker Image'
+    pool:
+      vmImage: 'ubuntu-latest'
+    
+    steps:
+    - task: UseDotNet@2
+      displayName: 'Use .NET 6 SDK'
+      inputs:
+        version: '6.0.x'
+        includePreviewVersions: false
+    
+    - task: DotNetCoreCLI@2
+      displayName: 'Publish application'
+      inputs:
+        command: 'publish'
+        projects: '**/*.csproj'
+        arguments: '--configuration $(buildConfiguration) --output $(Build.ArtifactStagingDirectory)/publish'
+        publishWebProjects: true
+    
+    - task: Docker@2
+      displayName: 'Build Docker image'
+      inputs:
+        containerRegistry: '$(dockerRegistryServiceConnection)'
+        repository: '$(imageRepository)'
+        command: 'buildAndPush'
+        Dockerfile: '**/Dockerfile'
+        tags: |
+          $(Build.BuildNumber)
+          latest
+        arguments: '--build-arg BUILD_CONFIGURATION=$(buildConfiguration)'
+    
+    - task: Docker@2
+      displayName: 'Scan Docker image for vulnerabilities'
+      inputs:
+        containerRegistry: '$(dockerRegistryServiceConnection)'
+        repository: '$(imageRepository)'
+        command: 'scan'
+        tags: '$(Build.BuildNumber)'
+    
+    - task: Docker@2
+      displayName: 'Sign Docker image'
+      inputs:
+        containerRegistry: '$(dockerRegistryServiceConnection)'
+        repository: '$(imageRepository)'
+        command: 'sign'
+        tags: '$(Build.BuildNumber)'
+        arguments: '--key $(DockerSigningKey)'
+    
+    - task: PublishBuildArtifacts@1
+      displayName: 'Publish Build Artifacts'
+      inputs:
+        PathtoPublish: '$(Build.ArtifactStagingDirectory)'
+        ArtifactName: 'drop'
+        publishLocation: 'Container'
+
+- stage: QualityGate
+  displayName: 'Quality Gate'
+  dependsOn: Build
+  jobs:
+  - job: QualityCheck
+    displayName: 'Quality Gate Check'
+    pool:
+      vmImage: 'ubuntu-latest'
+    
+    steps:
+    - task: SonarQubePublish@4
+      displayName: 'Check SonarQube Quality Gate'
+      inputs:
+        pollingTimeoutSec: '300'
+    
+    - task: SonarQubeQualityGate@4
+      displayName: 'Wait for Quality Gate'
+      inputs:
+        pollingTimeoutSec: '300'
+    
+    - task: PowerShell@2
+      displayName: 'Quality Gate Decision'
+      inputs:
+        targetType: 'inline'
+        script: |
+          if ("$(SonarQube.QualityGate.Status)" -eq "OK") {
+            Write-Host "Quality Gate PASSED"
+            Write-Host "##vso[task.setvariable variable=QualityGatePassed]true"
+          } else {
+            Write-Host "Quality Gate FAILED"
+            Write-Host "##vso[task.setvariable variable=QualityGatePassed]false"
+            Write-Host "##vso[task.complete result=Failed;]"
+          }
+
+- stage: Notify
+  displayName: 'Notifications'
+  dependsOn: 
+    - Build
+    - QualityGate
+  condition: always()
+  jobs:
+  - job: SendNotifications
+    displayName: 'Send Build Notifications'
+    pool:
+      vmImage: 'ubuntu-latest'
+    
+    steps:
+    - task: PowerShell@2
+      displayName: 'Send Teams Notification'
+      inputs:
+        targetType: 'inline'
+        script: |
+          $webhookUrl = "$(TeamsWebhookUrl)"
+          $status = "$(Agent.JobStatus)"
+          $buildUrl = "$(Build.BuildUri)"
+          $buildNumber = "$(Build.BuildNumber)"
+          $repository = "$(Build.Repository.Name)"
+          $branch = "$(Build.SourceBranchName)"
+          
+          $body = @{
+            "@type" = "MessageCard"
+            "@context" = "http://schema.org/extensions"
+            "themeColor" = if ($status -eq "Succeeded") { "00FF00" } else { "FF0000" }
+            "summary" = "Build $status - $repository"
+            "sections" = @(
+              @{
+                "activityTitle" = "Build $status"
+                "activitySubtitle" = "$repository - $branch"
+                "facts" = @(
+                  @{
+                    "name" = "Build Number"
+                    "value" = $buildNumber
+                  },
+                  @{
+                    "name" = "Repository"
+                    "value" = $repository
+                  },
+                  @{
+                    "name" = "Branch"
+                    "value" = $branch
+                  },
+                  @{
+                    "name" = "Status"
+                    "value" = $status
+                  }
+                )
+                "markdown" = $true
+              }
+            )
+            "potentialAction" = @(
+              @{
+                "@type" = "OpenUri"
+                "name" = "View Build"
+                "targets" = @(
+                  @{
+                    "os" = "default"
+                    "uri" = $buildUrl
+                  }
+                )
+              }
+            )
+          }
+          
+          $jsonBody = $body | ConvertTo-Json -Depth 10
+          
+          Invoke-RestMethod -Uri $webhookUrl -Method Post -Body $jsonBody -ContentType "application/json" 

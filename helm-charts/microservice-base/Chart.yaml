@@ -1,0 +1,17 @@
+apiVersion: v2
+name: microservice-base
+description: A Helm chart for .NET microservices with standardized configuration
+type: application
+version: 1.0.0
+appVersion: "1.0.0"
+keywords:
+  - microservice
+  - dotnet
+  - kubernetes
+  - helm
+home: https://github.com/your-org/platform
+sources:
+  - https://github.com/your-org/platform
+maintainers:
+  - name: DevOps Team
+    email: devops@your-org.com 

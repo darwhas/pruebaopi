@@ -1,0 +1,110 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "microservice-base.fullname" . }}
+  labels:
+    {{- include "microservice-base.labels" . | nindent 4 }}
+  annotations:
+    {{- include "microservice-base.annotations" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount | default 2 }}
+  strategy:
+    {{- toYaml .Values.rollback.strategy | nindent 4 }}
+  selector:
+    matchLabels:
+      {{- include "microservice-base.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "microservice-base.selectorLabels" . | nindent 8 }}
+      annotations:
+        {{- include "microservice-base.annotations" . | nindent 8 }}
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- if .Values.secrets }}
+        checksum/secrets: {{ include (print $.Template.BasePath "/secrets.yaml") . | sha256sum }}
+        {{- end }}
+    spec:
+      {{- if .Values.pod.nodeSelector }}
+      nodeSelector:
+        {{- toYaml .Values.pod.nodeSelector | nindent 8 }}
+      {{- end }}
+      {{- if .Values.pod.tolerations }}
+      tolerations:
+        {{- toYaml .Values.pod.tolerations | nindent 8 }}
+      {{- end }}
+      {{- if .Values.pod.affinity }}
+      affinity:
+        {{- toYaml .Values.pod.affinity | nindent 8 }}
+      {{- end }}
+      {{- if .Values.security.securityContext }}
+      securityContext:
+        {{- toYaml .Values.security.securityContext | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: {{ .Chart.Name }}
+          image: "{{ .Values.image.repository }}/{{ .Values.application.name }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.container.port }}
+              protocol: TCP
+          {{- if .Values.container.livenessProbe }}
+          livenessProbe:
+            {{- toYaml .Values.container.livenessProbe | nindent 12 }}
+          {{- end }}
+          {{- if .Values.container.readinessProbe }}
+          readinessProbe:
+            {{- toYaml .Values.container.readinessProbe | nindent 12 }}
+          {{- end }}
+          {{- if .Values.container.startupProbe }}
+          startupProbe:
+            {{- toYaml .Values.container.startupProbe | nindent 12 }}
+          {{- end }}
+          {{- if .Values.security.containerSecurityContext }}
+          securityContext:
+            {{- toYaml .Values.security.containerSecurityContext | nindent 12 }}
+          {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          env:
+            {{- range .Values.env.common }}
+            - name: {{ .name }}
+              value: {{ .value | quote }}
+            {{- end }}
+            {{- range .Values.env.application }}
+            - name: {{ .name }}
+              value: {{ .value | quote }}
+            {{- end }}
+            {{- range .Values.env.secrets }}
+            - name: {{ .name }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .secretName }}
+                  key: {{ .secretKey }}
+            {{- end }}
+          {{- if .Values.configMaps.common }}
+          volumeMounts:
+            - name: config-volume
+              mountPath: /app/config
+              readOnly: true
+          {{- end }}
+          {{- if .Values.secrets.common }}
+            - name: secrets-volume
+              mountPath: /app/secrets
+              readOnly: true
+          {{- end }}
+      {{- if .Values.configMaps.common }}
+      volumes:
+        - name: config-volume
+          configMap:
+            name: {{ include "microservice-base.fullname" . }}-config
+      {{- end }}
+      {{- if .Values.secrets.common }}
+        - name: secrets-volume
+          secret:
+            secretName: {{ include "microservice-base.fullname" . }}-secrets
+      {{- end }}
+      {{- if .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml .Values.imagePullSecrets | nindent 8 }}
+      {{- end }} 

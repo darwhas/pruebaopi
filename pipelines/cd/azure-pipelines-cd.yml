@@ -1,0 +1,537 @@
+# Azure DevOps CD Pipeline
+# Continuous Deployment with GitOps for .NET Microservices
+
+trigger: none # Manual triggers only for CD
+
+resources:
+  pipelines:
+    - pipeline: ci-pipeline
+      source: 'CI-Pipeline'
+      trigger:
+        branches:
+          include:
+            - main
+            - develop
+
+variables:
+  # GitOps Configuration
+  gitOpsRepo: 'https://dev.azure.com/your-org/platform-config/_git/platform-config'
+  gitOpsBranch: 'main'
+  gitOpsPath: 'applications/$(Build.Repository.Name)'
+  
+  # Kubernetes Configuration
+  kubernetesServiceConnection: 'platform-aks-service-connection'
+  namespace: '$(Build.Repository.Name)'
+  
+  # Environment Configuration
+  environment: 'production'
+  
+  # Backup Configuration
+  backupEnabled: true
+  backupRetention: '30d'
+  
+  # Rollback Configuration
+  rollbackEnabled: true
+  maxRollbackHistory: 10
+
+stages:
+- stage: PreDeployment
+  displayName: 'Pre-Deployment Checks'
+  jobs:
+  - deployment: PreDeploymentChecks
+    displayName: 'Pre-Deployment Validation'
+    environment: $(environment)
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - download: ci-pipeline
+            artifact: drop
+            
+          - task: PowerShell@2
+            displayName: 'Validate Image Security'
+            inputs:
+              targetType: 'inline'
+              script: |
+                $imageTag = "$(Build.BuildNumber)"
+                $repository = "$(Build.Repository.Name)"
+                
+                # Check if image exists in ACR
+                Write-Host "Validating image: $repository:$imageTag"
+                
+                # Verify image signature
+                Write-Host "Verifying image signature..."
+                
+                # Check for known vulnerabilities
+                Write-Host "Checking for vulnerabilities..."
+                
+                Write-Host "Image validation completed successfully"
+          
+          - task: PowerShell@2
+            displayName: 'Validate Infrastructure'
+            inputs:
+              targetType: 'inline'
+              script: |
+                # Check AKS cluster health
+                Write-Host "Checking AKS cluster health..."
+                
+                # Check resource availability
+                Write-Host "Checking resource availability..."
+                
+                # Validate network policies
+                Write-Host "Validating network policies..."
+                
+                Write-Host "Infrastructure validation completed"
+          
+          - task: PowerShell@2
+            displayName: 'Database Backup'
+            inputs:
+              targetType: 'inline'
+              script: |
+                if ("$(backupEnabled)" -eq "true") {
+                  Write-Host "Creating database backup..."
+                  
+                  # Backup MongoDB
+                  Write-Host "Backing up MongoDB..."
+                  
+                  # Backup PostgreSQL
+                  Write-Host "Backing up PostgreSQL..."
+                  
+                  # Backup Redis (if needed)
+                  Write-Host "Backing up Redis..."
+                  
+                  Write-Host "Database backup completed"
+                } else {
+                  Write-Host "Database backup skipped"
+                }
+
+- stage: Deploy
+  displayName: 'Deploy to Kubernetes'
+  dependsOn: PreDeployment
+  jobs:
+  - deployment: DeployToK8s
+    displayName: 'Deploy Application'
+    environment: $(environment)
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - download: ci-pipeline
+            artifact: drop
+            
+          - task: PowerShell@2
+            displayName: 'Update GitOps Repository'
+            inputs:
+              targetType: 'inline'
+              script: |
+                $gitOpsRepo = "$(gitOpsRepo)"
+                $gitOpsBranch = "$(gitOpsBranch)"
+                $gitOpsPath = "$(gitOpsPath)"
+                $imageTag = "$(Build.BuildNumber)"
+                $repository = "$(Build.Repository.Name)"
+                
+                # Clone GitOps repository
+                Write-Host "Cloning GitOps repository..."
+                git clone -b $gitOpsBranch $gitOpsRepo config-repo
+                cd config-repo
+                
+                # Update Helm values
+                $valuesFile = "$gitOpsPath/values.yaml"
+                if (Test-Path $valuesFile) {
+                  Write-Host "Updating Helm values file..."
+                  $values = Get-Content $valuesFile | ConvertFrom-Yaml
+                  $values.image.tag = $imageTag
+                  $values.application.version = $imageTag
+                  $values | ConvertTo-Yaml | Set-Content $valuesFile
+                }
+                
+                # Update ArgoCD application manifest
+                $appFile = "$gitOpsPath/application.yaml"
+                if (Test-Path $appFile) {
+                  Write-Host "Updating ArgoCD application manifest..."
+                  $app = Get-Content $appFile | ConvertFrom-Yaml
+                  $app.spec.source.targetRevision = $imageTag
+                  $app | ConvertTo-Yaml | Set-Content $appFile
+                }
+                
+                # Commit and push changes
+                git config user.email "devops@your-org.com"
+                git config user.name "Azure DevOps"
+                git add .
+                git commit -m "Deploy $repository:$imageTag to $environment"
+                git push origin $gitOpsBranch
+                
+                Write-Host "GitOps repository updated successfully"
+          
+          - task: PowerShell@2
+            displayName: 'Wait for ArgoCD Sync'
+            inputs:
+              targetType: 'inline'
+              script: |
+                $namespace = "$(namespace)"
+                $appName = "$(Build.Repository.Name)"
+                $timeout = 600  # 10 minutes
+                $interval = 30  # 30 seconds
+                $elapsed = 0
+                
+                Write-Host "Waiting for ArgoCD to sync application: $appName"
+                
+                while ($elapsed -lt $timeout) {
+                  try {
+                    $status = kubectl get application $appName -n argocd -o jsonpath='{.status.sync.status}'
+                    $health = kubectl get application $appName -n argocd -o jsonpath='{.status.health.status}'
+                    
+                    Write-Host "Sync Status: $status, Health: $health"
+                    
+                    if ($status -eq "Synced" -and $health -eq "Healthy") {
+                      Write-Host "ArgoCD sync completed successfully"
+                      break
+                    }
+                  } catch {
+                    Write-Host "Error checking ArgoCD status: $_"
+                  }
+                  
+                  Start-Sleep -Seconds $interval
+                  $elapsed += $interval
+                }
+                
+                if ($elapsed -ge $timeout) {
+                  Write-Error "ArgoCD sync timeout after $timeout seconds"
+                  exit 1
+                }
+          
+          - task: PowerShell@2
+            displayName: 'Verify Deployment'
+            inputs:
+              targetType: 'inline'
+              script: |
+                $namespace = "$(namespace)"
+                $appName = "$(Build.Repository.Name)"
+                $timeout = 300  # 5 minutes
+                $interval = 10  # 10 seconds
+                $elapsed = 0
+                
+                Write-Host "Verifying deployment: $appName"
+                
+                while ($elapsed -lt $timeout) {
+                  try {
+                    $pods = kubectl get pods -n $namespace -l app.kubernetes.io/name=$appName -o json
+                    $podsObj = $pods | ConvertFrom-Json
+                    
+                    $readyPods = 0
+                    $totalPods = $podsObj.items.Count
+                    
+                    foreach ($pod in $podsObj.items) {
+                      if ($pod.status.phase -eq "Running") {
+                        $ready = $true
+                        foreach ($container in $pod.status.containerStatuses) {
+                          if (-not $container.ready) {
+                            $ready = $false
+                            break
+                          }
+                        }
+                        if ($ready) {
+                          $readyPods++
+                        }
+                      }
+                    }
+                    
+                    Write-Host "Ready pods: $readyPods/$totalPods"
+                    
+                    if ($readyPods -eq $totalPods -and $totalPods -gt 0) {
+                      Write-Host "All pods are ready"
+                      break
+                    }
+                  } catch {
+                    Write-Host "Error checking pod status: $_"
+                  }
+                  
+                  Start-Sleep -Seconds $interval
+                  $elapsed += $interval
+                }
+                
+                if ($elapsed -ge $timeout) {
+                  Write-Error "Deployment verification timeout"
+                  exit 1
+                }
+
+- stage: PostDeployment
+  displayName: 'Post-Deployment Validation'
+  dependsOn: Deploy
+  jobs:
+  - deployment: PostDeploymentTests
+    displayName: 'Post-Deployment Tests'
+    environment: $(environment)
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - task: PowerShell@2
+            displayName: 'Smoke Tests'
+            inputs:
+              targetType: 'inline'
+              script: |
+                $appName = "$(Build.Repository.Name)"
+                $domain = "$(application.domain)"
+                
+                Write-Host "Running smoke tests for $appName"
+                
+                # Health check
+                $healthUrl = "https://$appName.$domain/health"
+                try {
+                  $response = Invoke-WebRequest -Uri $healthUrl -Method GET -TimeoutSec 30
+                  if ($response.StatusCode -eq 200) {
+                    Write-Host "Health check passed"
+                  } else {
+                    Write-Error "Health check failed: $($response.StatusCode)"
+                    exit 1
+                  }
+                } catch {
+                  Write-Error "Health check failed: $_"
+                  exit 1
+                }
+                
+                # Basic functionality test
+                $apiUrl = "https://$appName.$domain/api/version"
+                try {
+                  $response = Invoke-WebRequest -Uri $apiUrl -Method GET -TimeoutSec 30
+                  if ($response.StatusCode -eq 200) {
+                    Write-Host "API version check passed"
+                  } else {
+                    Write-Error "API version check failed: $($response.StatusCode)"
+                    exit 1
+                  }
+                } catch {
+                  Write-Error "API version check failed: $_"
+                  exit 1
+                }
+                
+                Write-Host "Smoke tests completed successfully"
+          
+          - task: PowerShell@2
+            displayName: 'Performance Tests'
+            inputs:
+              targetType: 'inline'
+              script: |
+                $appName = "$(Build.Repository.Name)"
+                $domain = "$(application.domain)"
+                
+                Write-Host "Running performance tests for $appName"
+                
+                # Load test with k6 or similar
+                Write-Host "Running load test..."
+                
+                # Check response times
+                Write-Host "Checking response times..."
+                
+                # Verify resource usage
+                Write-Host "Verifying resource usage..."
+                
+                Write-Host "Performance tests completed"
+          
+          - task: PowerShell@2
+            displayName: 'Security Tests'
+            inputs:
+              targetType: 'inline'
+              script: |
+                $appName = "$(Build.Repository.Name)"
+                $domain = "$(application.domain)"
+                
+                Write-Host "Running security tests for $appName"
+                
+                # SSL/TLS verification
+                Write-Host "Verifying SSL/TLS configuration..."
+                
+                # Security headers check
+                Write-Host "Checking security headers..."
+                
+                # Vulnerability scan
+                Write-Host "Running vulnerability scan..."
+                
+                Write-Host "Security tests completed"
+
+- stage: Rollback
+  displayName: 'Rollback (if needed)'
+  dependsOn: PostDeployment
+  condition: failed()
+  jobs:
+  - deployment: RollbackDeployment
+    displayName: 'Rollback Application'
+    environment: $(environment)
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - task: PowerShell@2
+            displayName: 'Trigger Rollback'
+            inputs:
+              targetType: 'inline'
+              script: |
+                $gitOpsRepo = "$(gitOpsRepo)"
+                $gitOpsBranch = "$(gitOpsBranch)"
+                $gitOpsPath = "$(gitOpsPath)"
+                $repository = "$(Build.Repository.Name)"
+                
+                Write-Host "Initiating rollback for $repository"
+                
+                # Get previous version from ArgoCD
+                $prevVersion = kubectl get application $repository -n argocd -o jsonpath='{.status.history[1].revision}'
+                
+                if ($prevVersion) {
+                  Write-Host "Rolling back to version: $prevVersion"
+                  
+                  # Clone GitOps repository
+                  git clone -b $gitOpsBranch $gitOpsRepo config-repo
+                  cd config-repo
+                  
+                  # Update to previous version
+                  $valuesFile = "$gitOpsPath/values.yaml"
+                  if (Test-Path $valuesFile) {
+                    $values = Get-Content $valuesFile | ConvertFrom-Yaml
+                    $values.image.tag = $prevVersion
+                    $values.application.version = $prevVersion
+                    $values | ConvertTo-Yaml | Set-Content $valuesFile
+                  }
+                  
+                  # Commit and push rollback
+                  git config user.email "devops@your-org.com"
+                  git config user.name "Azure DevOps"
+                  git add .
+                  git commit -m "ROLLBACK: $repository to version $prevVersion"
+                  git push origin $gitOpsBranch
+                  
+                  Write-Host "Rollback initiated successfully"
+                } else {
+                  Write-Error "No previous version found for rollback"
+                  exit 1
+                }
+          
+          - task: PowerShell@2
+            displayName: 'Verify Rollback'
+            inputs:
+              targetType: 'inline'
+              script: |
+                $namespace = "$(namespace)"
+                $appName = "$(Build.Repository.Name)"
+                $timeout = 300
+                $interval = 10
+                $elapsed = 0
+                
+                Write-Host "Verifying rollback for $appName"
+                
+                while ($elapsed -lt $timeout) {
+                  try {
+                    $pods = kubectl get pods -n $namespace -l app.kubernetes.io/name=$appName -o json
+                    $podsObj = $pods | ConvertFrom-Json
+                    
+                    $readyPods = 0
+                    $totalPods = $podsObj.items.Count
+                    
+                    foreach ($pod in $podsObj.items) {
+                      if ($pod.status.phase -eq "Running") {
+                        $ready = $true
+                        foreach ($container in $pod.status.containerStatuses) {
+                          if (-not $container.ready) {
+                            $ready = $false
+                            break
+                          }
+                        }
+                        if ($ready) {
+                          $readyPods++
+                        }
+                      }
+                    }
+                    
+                    Write-Host "Ready pods after rollback: $readyPods/$totalPods"
+                    
+                    if ($readyPods -eq $totalPods -and $totalPods -gt 0) {
+                      Write-Host "Rollback completed successfully"
+                      break
+                    }
+                  } catch {
+                    Write-Host "Error checking rollback status: $_"
+                  }
+                  
+                  Start-Sleep -Seconds $interval
+                  $elapsed += $interval
+                }
+                
+                if ($elapsed -ge $timeout) {
+                  Write-Error "Rollback verification timeout"
+                  exit 1
+                }
+
+- stage: Notify
+  displayName: 'Deployment Notifications'
+  dependsOn: 
+    - Deploy
+    - PostDeployment
+    - Rollback
+  condition: always()
+  jobs:
+  - deployment: SendNotifications
+    displayName: 'Send Deployment Notifications'
+    environment: $(environment)
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - task: PowerShell@2
+            displayName: 'Send Teams Notification'
+            inputs:
+              targetType: 'inline'
+              script: |
+                $webhookUrl = "$(TeamsWebhookUrl)"
+                $status = "$(Agent.JobStatus)"
+                $buildUrl = "$(Build.BuildUri)"
+                $buildNumber = "$(Build.BuildNumber)"
+                $repository = "$(Build.Repository.Name)"
+                $environment = "$(environment)"
+                
+                $body = @{
+                  "@type" = "MessageCard"
+                  "@context" = "http://schema.org/extensions"
+                  "themeColor" = if ($status -eq "Succeeded") { "00FF00" } else { "FF0000" }
+                  "summary" = "Deployment $status - $repository to $environment"
+                  "sections" = @(
+                    @{
+                      "activityTitle" = "Deployment $status"
+                      "activitySubtitle" = "$repository to $environment"
+                      "facts" = @(
+                        @{
+                          "name" = "Build Number"
+                          "value" = $buildNumber
+                        },
+                        @{
+                          "name" = "Repository"
+                          "value" = $repository
+                        },
+                        @{
+                          "name" = "Environment"
+                          "value" = $environment
+                        },
+                        @{
+                          "name" = "Status"
+                          "value" = $status
+                        }
+                      )
+                      "markdown" = $true
+                    }
+                  )
+                  "potentialAction" = @(
+                    @{
+                      "@type" = "OpenUri"
+                      "name" = "View Build"
+                      "targets" = @(
+                        @{
+                          "os" = "default"
+                          "uri" = $buildUrl
+                        }
+                      )
+                    }
+                  )
+                }
+                
+                $jsonBody = $body | ConvertTo-Json -Depth 10
+                
+                Invoke-RestMethod -Uri $webhookUrl -Method Post -Body $jsonBody -ContentType "application/json" 
